@@ -530,7 +530,7 @@ def brightness(image, brightness_factor=(0,0),  mode='2D'):
     if brightness_factor[0] == 0 and brightness_factor[1] == 0: return image
 
     # Force mode if 2D
-    if image.ndim == 3: mode == '3D'
+    if image.ndim == 3: mode = '3D'
 
     if mode == '2D':
         b_factor = np.random.uniform(brightness_factor[0], brightness_factor[1], image.shape[-1]*3)
