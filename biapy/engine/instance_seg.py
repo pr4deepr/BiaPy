@@ -6,6 +6,7 @@ from skimage.io import imread
 from tqdm import tqdm
 from skimage.segmentation import clear_border
 from skimage.transform import resize
+import torch.distributed as dist
 
 from biapy.data.post_processing.post_processing import (watershed_by_channels, voronoi_on_mask, 
     measure_morphological_props_and_filter, repare_large_blobs, apply_binary_mask)
@@ -14,6 +15,8 @@ from biapy.utils.util import save_tif
 from biapy.utils.matching import matching, wrapper_matching_dataset_lazy
 from biapy.engine.metrics import jaccard_index, instance_segmentation_loss, instance_metrics
 from biapy.engine.base_workflow import Base_Workflow
+from biapy.utils.misc import is_main_process, is_dist_avail_and_initialized
+
 
 class Instance_Segmentation_Workflow(Base_Workflow):
     """
@@ -131,17 +134,17 @@ class Instance_Segmentation_Workflow(Base_Workflow):
         )
 
         if self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "BC":
-            self.metric_names = ["jaccard_index", "jaccard_index"]
+            self.metric_names = ["jaccard_index_B", "jaccard_index_C"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "BCM":
-            self.metric_names = ["jaccard_index", "jaccard_index", "jaccard_index"]
+            self.metric_names = ["jaccard_index_B", "jaccard_index_C", "jaccard_index_M"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "BP":
-            self.metric_names = ["jaccard_index", "jaccard_index"]
+            self.metric_names = ["jaccard_index_B", "jaccard_index_P"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "BD":
-            self.metric_names = ["jaccard_index", "L1_distance_channel"]
+            self.metric_names = ["jaccard_index_B", "L1_distance_channel"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS in ["BCD", 'BCDv2']:
-            self.metric_names = ["jaccard_index", "jaccard_index", "L1_distance_channel"]
+            self.metric_names = ["jaccard_index_B", "jaccard_index_C", "L1_distance_channel"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "BDv2":
-            self.metric_names = ["jaccard_index", "L1_distance_channel"]
+            self.metric_names = ["jaccard_index_B", "L1_distance_channel"]
         elif self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS == "Dv2":
             self.metric_names = ["L1_distance_channel"]
 
@@ -181,7 +184,7 @@ class Instance_Segmentation_Workflow(Base_Workflow):
             first_val = None
             for key, value in out.items():
                 value = value.item() if not torch.isnan(value) else 0
-                if first_val is None and key == "jaccard_index": 
+                if first_val is None and "jaccard_index" in key: 
                     first_val = value
                 if metric_logger is not None:
                     metric_logger.meters[key].update(value)
@@ -366,14 +369,14 @@ class Instance_Segmentation_Workflow(Base_Workflow):
                     colored_result = np.zeros(w_pred.shape+(3,), dtype=np.uint8)
 
                     print("Painting TPs and FNs . . .")
-                    for j in tqdm(range(len(gt_match))):
+                    for j in tqdm(range(len(gt_match)), disable=not is_main_process()):
                         color = (0,255,0) if tag[j] == "TP" else (255,0,0) # Green or red
                         colored_result[np.where(_Y == gt_match[j])] = color
-                    for j in tqdm(range(len(gt_unmatch))):
+                    for j in tqdm(range(len(gt_unmatch)), disable=not is_main_process()):
                         colored_result[np.where(_Y == gt_unmatch[j])] = (255,0,0) # Red
 
                     print("Painting FPs . . .")
-                    for j in tqdm(range(len(fp_instances))):
+                    for j in tqdm(range(len(fp_instances)), disable=not is_main_process()):
                         colored_result[np.where(w_pred == fp_instances[j])] = (0,0,255) # Blue
 
                     save_tif(np.expand_dims(colored_result,0), self.cfg.PATHS.RESULT_DIR.INST_ASSOC_POINTS,
@@ -485,14 +488,14 @@ class Instance_Segmentation_Workflow(Base_Workflow):
                         colored_result = np.zeros(w_pred.shape+(3,), dtype=np.uint8)
 
                         print("Painting TPs and FNs . . .")
-                        for j in tqdm(range(len(gt_match))):
+                        for j in tqdm(range(len(gt_match)), disable=not is_main_process()):
                             color = (0,255,0) if tag[j] == "TP" else (255,0,0) # Green or red
                             colored_result[np.where(_Y == gt_match[j])] = color
-                        for j in tqdm(range(len(gt_unmatch))):
+                        for j in tqdm(range(len(gt_unmatch)), disable=not is_main_process()):
                             colored_result[np.where(_Y == gt_unmatch[j])] = (255,0,0) # Red
                             
                         print("Painting FPs . . .")
-                        for j in tqdm(range(len(fp_instances))):
+                        for j in tqdm(range(len(fp_instances)), disable=not is_main_process()):
                             colored_result[np.where(w_pred == fp_instances[j])] = (0,0,255) # Blue
 
                         save_tif(np.expand_dims(colored_result,0), self.cfg.PATHS.RESULT_DIR.INST_ASSOC_POINTS,
@@ -748,37 +751,42 @@ class Instance_Segmentation_Workflow(Base_Workflow):
         Creates instance segmentation ground truth images to train the model based on the ground truth instances provided.
         They will be saved in a separate folder in the root path of the ground truth. 
         """
-        print("###########################")
-        print("#  PREPARE INSTANCE DATA  #")
-        print("###########################")
         original_test_path, original_test_mask_path = None, None
 
-        # Create selected channels for train data
-        if (self.cfg.TRAIN.ENABLE or self.cfg.DATA.TEST.USE_VAL_AS_TEST) and (not os.path.isdir(self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_DIR) or \
-            not os.path.isdir(self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_MASK_DIR)):
-            print("You select to create {} channels from given instance labels and no file is detected in {}. "
-                    "So let's prepare the data. Notice that, if you do not modify 'DATA.TRAIN.INSTANCE_CHANNELS_DIR' "
-                    "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
-                    self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_DIR))
-            create_instance_channels(self.cfg)
+        if is_main_process():
+            print("###########################")
+            print("#  PREPARE INSTANCE DATA  #")
+            print("###########################")
 
-        # Create selected channels for val data
-        if self.cfg.TRAIN.ENABLE and not self.cfg.DATA.VAL.FROM_TRAIN and (not os.path.isdir(self.cfg.DATA.VAL.INSTANCE_CHANNELS_DIR) or \
-            not os.path.isdir(self.cfg.DATA.VAL.INSTANCE_CHANNELS_MASK_DIR)):
-            print("You select to create {} channels from given instance labels and no file is detected in {}. "
-                    "So let's prepare the data. Notice that, if you do not modify 'DATA.VAL.INSTANCE_CHANNELS_DIR' "
-                    "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
-                    self.cfg.DATA.VAL.INSTANCE_CHANNELS_DIR))
-            create_instance_channels(self.cfg, data_type='val')
+            # Create selected channels for train data
+            if (self.cfg.TRAIN.ENABLE or self.cfg.DATA.TEST.USE_VAL_AS_TEST) and (not os.path.isdir(self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_DIR) or \
+                not os.path.isdir(self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_MASK_DIR)):
+                print("You select to create {} channels from given instance labels and no file is detected in {}. "
+                        "So let's prepare the data. Notice that, if you do not modify 'DATA.TRAIN.INSTANCE_CHANNELS_DIR' "
+                        "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
+                        self.cfg.DATA.TRAIN.INSTANCE_CHANNELS_DIR))
+                create_instance_channels(self.cfg)
 
-        # Create selected channels for test data once
-        if self.cfg.TEST.ENABLE and not self.cfg.DATA.TEST.USE_VAL_AS_TEST and (not os.path.isdir(self.cfg.DATA.TEST.INSTANCE_CHANNELS_DIR) or \
-            (not os.path.isdir(self.cfg.DATA.TEST.INSTANCE_CHANNELS_MASK_DIR) and self.cfg.DATA.TEST.LOAD_GT)) and not self.cfg.TEST.BY_CHUNKS.ENABLE:
-            print("You select to create {} channels from given instance labels and no file is detected in {}. "
-                    "So let's prepare the data. Notice that, if you do not modify 'DATA.TEST.INSTANCE_CHANNELS_DIR' "
-                    "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
-                    self.cfg.DATA.TEST.INSTANCE_CHANNELS_MASK_DIR))
-            create_test_instance_channels(self.cfg)
+            # Create selected channels for val data
+            if self.cfg.TRAIN.ENABLE and not self.cfg.DATA.VAL.FROM_TRAIN and (not os.path.isdir(self.cfg.DATA.VAL.INSTANCE_CHANNELS_DIR) or \
+                not os.path.isdir(self.cfg.DATA.VAL.INSTANCE_CHANNELS_MASK_DIR)):
+                print("You select to create {} channels from given instance labels and no file is detected in {}. "
+                        "So let's prepare the data. Notice that, if you do not modify 'DATA.VAL.INSTANCE_CHANNELS_DIR' "
+                        "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
+                        self.cfg.DATA.VAL.INSTANCE_CHANNELS_DIR))
+                create_instance_channels(self.cfg, data_type='val')
+
+            # Create selected channels for test data once
+            if self.cfg.TEST.ENABLE and not self.cfg.DATA.TEST.USE_VAL_AS_TEST and (not os.path.isdir(self.cfg.DATA.TEST.INSTANCE_CHANNELS_DIR) or \
+                (not os.path.isdir(self.cfg.DATA.TEST.INSTANCE_CHANNELS_MASK_DIR) and self.cfg.DATA.TEST.LOAD_GT)) and not self.cfg.TEST.BY_CHUNKS.ENABLE:
+                print("You select to create {} channels from given instance labels and no file is detected in {}. "
+                        "So let's prepare the data. Notice that, if you do not modify 'DATA.TEST.INSTANCE_CHANNELS_DIR' "
+                        "path, this process will be done just once!".format(self.cfg.PROBLEM.INSTANCE_SEG.DATA_CHANNELS,
+                        self.cfg.DATA.TEST.INSTANCE_CHANNELS_MASK_DIR))
+                create_test_instance_channels(self.cfg)
+
+        if is_dist_avail_and_initialized():
+            dist.barrier()
 
         opts = []
         if self.cfg.TRAIN.ENABLE:

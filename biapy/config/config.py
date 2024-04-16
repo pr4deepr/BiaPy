@@ -154,6 +154,15 @@ class Config:
         # Number between [0, 1] indicating the std of the Gaussian noise N(0,std).
         _C.PROBLEM.SELF_SUPERVISED.NOISE = 0.2
 
+        ### IMAGE_TO_IMAGE
+        _C.PROBLEM.IMAGE_TO_IMAGE = CN()
+        # To use a custom data loader to load a random image from each image sample folder. The data needs to be structured
+        # in an special way, that is, instead of having images in the training/val folder a folder for each sample is expected, 
+        # where in each of those different versions of the same data sample will be placed. Visit the following tutorial
+        # for a real use case and a more detailed description:
+        #   - https://biapy.readthedocs.io/en/latest/tutorials/image-to-image/lightmycells.html 
+        _C.PROBLEM.IMAGE_TO_IMAGE.MULTIPLE_RAW_ONE_TARGET_LOADER = False
+
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # Dataset
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -182,13 +191,16 @@ class Config:
         # Normalization type to use. Possible options:
         #   'div' to divide values from 0/255 (or 0/65535 if uint16) in [0,1] range
         #   'custom' to use DATA.NORMALIZATION.CUSTOM_MEAN and DATA.NORMALIZATION.CUSTOM_STD to normalize
-        #   '' if no normalization to be applied 
+        #   'percentile' if no normalization to be applied 
         _C.DATA.NORMALIZATION.TYPE = 'div'
-        # Whether to apply the normalization by sample or with all dataset statistics
-        _C.DATA.NORMALIZATION.CUSTOM_MODE = "image"
+        # Whether to apply the normalization by sample ("image") or by all dataset statistics ("dataset"). Options: ["image", "dataset"]  
+        _C.DATA.NORMALIZATION.APPLICATION_MODE = "image"
+        # Custom normalization variables: mean and std (they are calculated if not provided)
         _C.DATA.NORMALIZATION.CUSTOM_MEAN = -1.0
         _C.DATA.NORMALIZATION.CUSTOM_STD = -1.0
-        
+        # Lower and upper bound for percentile normalization. Must be set when DATA.NORMALIZATION.TYPE = 'percentile'
+        _C.DATA.NORMALIZATION.PERC_LOWER = -1.0
+        _C.DATA.NORMALIZATION.PERC_UPPER = -1.0
 
         # If 'DATA.PATCH_SIZE' selected has 3 channels, e.g. RGB images are expected, so will force grayscale images to be
         # converted into RGB (e.g. in ImageNet some of the images are grayscale)
@@ -222,9 +234,13 @@ class Config:
         # performing some augmentations, e.g. cutout. If defined it need to be (y,x)/(z,y,x) and needs to be to be a 2D
         # tuple when using _C.PROBLEM.NDIM='2D' and 3D tuple when using _C.PROBLEM.NDIM='3D'
         _C.DATA.TRAIN.RESOLUTION = (-1,)
-        # Minimum foreground percentage that each image loaded need to have to not discard it. This option is only valid for SEMANTIC_SEG, 
-        # INSTANCE_SEG and DETECTION. 
+        # Minimum foreground percentage that each image loaded need to have to not discard it (only used when TRAIN.IN_MEMORY == True). 
+        # This option is only valid for SEMANTIC_SEG, INSTANCE_SEG and DETECTION. 
         _C.DATA.TRAIN.MINIMUM_FOREGROUND_PER = -1.
+        # Order of the axes of the image when using Zarr/H5 images to train
+        _C.DATA.TRAIN.INPUT_IMG_AXES_ORDER = 'TZCYX'
+        # Order of the axes of the mask when using Zarr/H5 images to train
+        _C.DATA.TRAIN.INPUT_MASK_AXES_ORDER = 'TZCYX'
 
         # PREPROCESSING
         # Same preprocessing will be applied to all selected datasets
@@ -372,7 +388,11 @@ class Config:
         _C.DATA.VAL.BINARY_MASKS = os.path.join("user_data", 'val', 'bin_mask')
         # Not used yet.
         _C.DATA.VAL.RESOLUTION = (-1,)
-
+        # Order of the axes of the image when using Zarr/H5 images to train
+        _C.DATA.VAL.INPUT_IMG_AXES_ORDER = 'TZCYX'
+        # Order of the axes of the mask when using Zarr/H5 images to train. 
+        # detection the mask
+        _C.DATA.VAL.INPUT_MASK_AXES_ORDER = 'TZCYX'
 
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # Data augmentation (DA)
@@ -1023,8 +1043,12 @@ class Config:
         _C.PATHS.PROB_MAP_FILENAME = 'prob_map.npy'
         # Watershed debugging folder
         _C.PATHS.WATERSHED_DIR = os.path.join(_C.PATHS.RESULT_DIR.PATH, 'watershed')
+        # Custom mean normalization paths
         _C.PATHS.MEAN_INFO_FILE = os.path.join(_C.PATHS.CHECKPOINT, 'normalization_mean_value.npy')
         _C.PATHS.STD_INFO_FILE = os.path.join(_C.PATHS.CHECKPOINT, 'normalization_std_value.npy')
+        # Percentile normalization paths
+        _C.PATHS.LWR_VAL_FILE = os.path.join(_C.PATHS.CHECKPOINT, 'lower_bound_perc.npy')
+        _C.PATHS.UPR_VAL_FILE = os.path.join(_C.PATHS.CHECKPOINT, 'upper_bound_perc.npy')
         # Path where the images used in MAE will be saved suring inference
         _C.PATHS.MAE_OUT_DIR = os.path.join(_C.PATHS.RESULT_DIR.PATH, 'MAE_checks')
         

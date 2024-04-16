@@ -13,6 +13,7 @@ from biapy.data.pre_processing import norm_range01, undo_norm_range01, denormali
 from biapy.data.post_processing.post_processing import ensemble8_2d_predictions, ensemble16_3d_predictions
 from biapy.data.data_2D_manipulation import crop_data_with_overlap, merge_data_with_overlap
 from biapy.data.data_3D_manipulation import crop_3D_data_with_overlap, merge_3D_data_with_overlap
+from biapy.engine.metrics import L1_wrapper, MSE_wrapper
 
 class Image_to_Image_Workflow(Base_Workflow):
     """
@@ -51,8 +52,8 @@ class Image_to_Image_Workflow(Base_Workflow):
         """
         self.metrics = [PeakSignalNoiseRatio().to(self.device), torch.nn.MSELoss()]
         self.metric_names = ["PSNR", "MSE"]
-        print("Overriding 'LOSS.TYPE' to set it to MAE")
-        self.loss = torch.nn.L1Loss()
+        print("Overriding 'LOSS.TYPE' to set it to MSE")
+        self.loss = MSE_wrapper()
 
     def metric_calculation(self, output, targets, metric_logger=None):
         """
@@ -224,8 +225,7 @@ class Image_to_Image_Workflow(Base_Workflow):
                 self._Y = self._Y.astype(np.float32)
             psnr_merge_patches = self.metrics[0](torch.from_numpy(pred), torch.from_numpy(self._Y))
             self.stats['psnr_merge_patches'] += psnr_merge_patches
-
-
+        
     def torchvision_model_call(self, in_img, is_train=False):
         """
         Call a regular Pytorch model.

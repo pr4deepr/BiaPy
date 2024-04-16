@@ -7,7 +7,7 @@ from skimage.io import imread
 from PIL import Image
 from PIL.TiffTags import TAGS
 
-from biapy.data.pre_processing import normalize, norm_range01
+from biapy.data.pre_processing import normalize, norm_range01, percentile_norm
 from biapy.data.generators.augmentors import center_crop_single, resize_img
 
 
@@ -50,21 +50,9 @@ class test_single_data_generator(Dataset):
     instance_problem : bool, optional
         Not used here.
 
-    norm_type : str, optional
-        Type of normalization to be made. Options available: ``div`` or ``custom``.
+    norm_dict : dict, optional
+        Normalization instructions. 
 
-    not_normalize : bool, optional
-        Whether to normalize the data or not. Useful in BMZ model as the normalization is made during the inference. 
-        
-    norm_custom_mean : float, optional
-        Mean of the data used to normalize.
-
-    norm_custom_std : float, optional
-        Std of the data used to normalize.
-
-    norm_custom_mode :  str, optional
-        Whether to apply the normalization by sample or with all dataset statistics. Options: ``'image'`` or ``'dataset'``.
-        
     reduce_mem : bool, optional
         To reduce the dtype from float32 to float16. 
 
@@ -78,16 +66,19 @@ class test_single_data_generator(Dataset):
     convert_to_rgb : bool, optional
         In case RGB images are expected, e.g. if ``crop_shape`` channel is 3, those images that are grayscale are 
         converted into RGB.
+    
+    multiple_raw_images : bool, optional
+        Not used in this generator yet but added for compatibility. 
     """
     def __init__(self, ndim, ptype, X=None, d_path=None, test_by_chunks=False, provide_Y=False, Y=None, 
-        dm_path=None, seed=42, instance_problem=False, norm_type='div', not_normalize=False, norm_custom_mean=None, 
-        norm_custom_std=None, norm_custom_mode=None, crop_center=False, reduce_mem=False, resize_shape=None, 
-        sample_ids=None, convert_to_rgb=False):
+        dm_path=None, seed=42, instance_problem=False, norm_dict=None, crop_center=False, 
+        reduce_mem=False, resize_shape=None, sample_ids=None, convert_to_rgb=False, multiple_raw_images=False):
         if X is None and d_path is None:
             raise ValueError("One between 'X' or 'd_path' must be provided")
         if crop_center and resize_shape is None:
             raise ValueError("'resize_shape' need to be provided if 'crop_center' is enabled")
         assert ptype in ['ssl', 'classification']
+        assert norm_dict != None, "Normalization instructions must be provided with 'norm_dict'"
 
         self.ptype = ptype
         self.X = X
@@ -133,34 +124,39 @@ class test_single_data_generator(Dataset):
         self.ndim = ndim
         self.o_indexes = np.arange(self.len)
         
-        self.not_normalize = not_normalize
+        self.norm_dict = norm_dict
         # Check if a division is required
         self.X_norm = {}
         self.X_norm['type'] = 'none'
-        if not self.not_normalize:
+        if norm_dict['enable']:
             self.X_norm['type'] = 'div'
-            img, _, xnorm = self.load_sample(0)
-
-            if norm_type == 'custom':
-                if norm_custom_mean is not None and norm_custom_std is not None:
-                    self.X_norm['mean'] = norm_custom_mean
-                    self.X_norm['std'] = norm_custom_std
-                    del img
+            img, _, xnorm, _ = self.load_sample(0)
+            self.X_norm['application_mode'] = norm_dict['application_mode']
+            self.X_norm['orig_dtype'] = img.dtype
+            if norm_dict['type'] == 'custom':
                 self.X_norm['type'] = 'custom'
-                self.X_norm['mode'] = norm_custom_mode
-                self.X_norm['orig_dtype'] = img.dtype
+                if 'mean' in norm_dict and 'std' in norm_dict:
+                    self.X_norm['mean'] = norm_dict['mean']
+                    self.X_norm['std'] = norm_dict['std'] 
+            elif norm_dict['type'] == "percentile":
+                self.X_norm['type'] = 'percentile'
+                self.X_norm['lower_bound'] = norm_dict['lower_bound']
+                self.X_norm['upper_bound'] = norm_dict['upper_bound'] 
+                self.X_norm['lower_value'] = norm_dict['lower_value']
+                self.X_norm['upper_value'] = norm_dict['upper_value'] 
+
             if xnorm is not None:
                 self.X_norm.update(xnorm)
-
+            
     def load_sample(self, idx):
         """Load one data sample given its corresponding index."""
-        img_class = None
+        img_class, filename = None, None
 
         # Choose the data source
         if self.X is not None:
             img = self.X[idx]
             img = np.squeeze(img)
-
+            filename = idx
             if self.provide_Y:
                 img_class = self.Y[idx] if self.ptype == "classification" else 0
         else:
@@ -174,6 +170,7 @@ class test_single_data_generator(Dataset):
                 img_class = 0 
             img = np.load(f) if sample_id.endswith('.npy') else imread(f)
             img = np.squeeze(img)
+            filename = f 
 
         # Correct dimensions 
         if self.ndim == 3:
@@ -193,24 +190,31 @@ class test_single_data_generator(Dataset):
 
         # Normalization
         xnorm = None
-        if not self.not_normalize:
+        if self.norm_dict['enable']:
             if self.X_norm['type'] == 'div':
                 img, xnorm = norm_range01(img, dtype=self.dtype)
             elif self.X_norm['type'] == 'custom':
-                if self.X_norm['mode'] == "image":
+                if self.X_norm['application_mode'] == "image":
                     xnorm = {}
                     xnorm['mean'] = img.mean()
                     xnorm['std'] = img.std()
                     img = normalize(img, img.mean(), img.std(), out_type=self.dtype_str)
                 else:
                     img = normalize(img, self.X_norm['mean'], self.X_norm['std'], out_type=self.dtype_str)
-            
+            elif self.X_norm['type'] == 'percentile':                                                                   
+                if self.X_norm['application_mode'] == "image":                                                                      
+                    img, xnorm = percentile_norm(img, lower=self.norm_dict['lower_bound'],                                     
+                        upper=self.norm_dict['upper_bound'])                                                
+                else:                                                                                                   
+                    img, xnorm = percentile_norm(img, lwr_perc_val=self.norm_dict['lower_value'],                                     
+                        uppr_perc_val=self.norm_dict['upper_value']) 
         img = np.expand_dims(img, 0).astype(self.dtype)
+        img_class = np.expand_dims(img_class, 0)
 
         if self.convert_to_rgb and img.shape[-1] == 1:
             img = np.repeat(img, 3, axis=-1)
 
-        return img, img_class, xnorm
+        return img, img_class, xnorm, filename
 
 
     def __len__(self):
@@ -219,23 +223,33 @@ class test_single_data_generator(Dataset):
 
 
     def __getitem__(self, index):
-        """Generation of one sample of data.
-
-           Parameters
-           ----------
-           index : int
-               Sample index counter.
-
-           Returns
-           -------
-           img : 3D Numpy array
-               X element, for instance, an image. E.g. ``(y, x, channels)``.
-
-           img_class : ints
-               Y element, for instance, a class number.
         """
+        Generation of one sample of data.
 
-        img, img_class, norm = self.load_sample(index)
+        Parameters
+        ----------
+        index : int
+            Sample index counter.
+
+        Returns
+        -------
+        dict : dict
+            Dictionary containing:
+
+            img : 4D/5D Numpy array
+                X element, for instance, an image. E.g. ``(1, z, y, x, channels)`` if ``2D`` or 
+                ``(1, y, x, channels)`` if ``3D``. 
+                
+            X_norm : dict
+                X element normalization steps.
+
+            file : str or int
+                Processed image file path or integer position in loaded data.
+                
+            img_class : 2D Numpy array, optional
+                Y element, for instance, a class number. E.g. ``(1, class)``.
+        """
+        img, img_class, norm, filename = self.load_sample(index)
         
         if self.crop_center and img.shape[:-1] != self.resize_shape[:-1]:
             img = center_crop_single(img[0], self.resize_shape)
@@ -247,11 +261,11 @@ class test_single_data_generator(Dataset):
 
         if self.ptype == "classification":
             if self.provide_Y:
-                return img, self.X_norm, img_class, None
+                return {"X": img, "X_norm": self.X_norm, "Y": img_class, "file": filename}
             else:
-                return img, self.X_norm
+                return {"X": img, "X_norm": self.X_norm, "file": filename}
         else: # SSL - MAE
-            return img, self.X_norm
-            
+            return {"X": img, "X_norm": self.X_norm, "file": filename}
+
     def get_data_normalization(self):
         return self.X_norm
